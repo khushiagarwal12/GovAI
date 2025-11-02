@@ -3,4 +3,4 @@ pandas
 numpy
 thefuzz
 google-generativeai==0.8.5
-python-dotenv
+python-dotenv==1.0.1
