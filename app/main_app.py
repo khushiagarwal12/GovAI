@@ -32,10 +32,10 @@ try:
         data = f.read()
         b64_data = base64.b64encode(data).decode()
 except FileNotFoundError:
-    b64_data = ""  # fallback if image missing
+    b64_data = ""
 
 # -----------------------------------------------------------
-# Inject CSS for header (SAFE)
+# Inject CSS for header
 # -----------------------------------------------------------
 st.markdown(f"""
 <style>
@@ -44,7 +44,6 @@ st.markdown(f"""
         padding-left: 40px !important;
         padding-right: 40px !important;
     }}
-
     .main-title {{
         text-align: center;
         font-size: 2.4rem;
@@ -58,14 +57,12 @@ st.markdown(f"""
         border-radius: 15px;
         width: 100%;
     }}
-
     .sub-title {{
         text-align: center;
         color: #ffffff;
         font-size: 1.1rem;
         margin-bottom: 30px;
     }}
-
     .dashboard-box {{
         background: #ffffff;
         padding: 18px 22px;
@@ -73,7 +70,6 @@ st.markdown(f"""
         box-shadow: 0 2px 6px rgba(0,0,0,0.08);
         margin-bottom: 18px;
     }}
-
     .section-header {{
         font-size: 1.3rem;
         font-weight: 700;
@@ -89,18 +85,38 @@ st.markdown("<h1 class='main-title'>GovAI Dashboard</h1>", unsafe_allow_html=Tru
 st.markdown("<p class='sub-title'>AI-powered analytics for city mortality and health trends</p>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------
-# Load & Clean Original Data
+# Helper functions
 # -----------------------------------------------------------
-try:
-    df = pd.read_csv(DEFAULT_CSV_PATH)
-except FileNotFoundError:
-    st.warning("Default CSV not found. Please upload a CSV in the Admin tab.")
-    df = pd.DataFrame()  # empty dataframe
+def unify_city_names(series, threshold=90):
+    unique_names = list(series.unique())
+    canonical = {}
+    for name in unique_names:
+        if canonical:
+            result = process.extractOne(name, canonical.keys(), score_cutoff=threshold)
+            if result:
+                canonical[name] = result[0]
+                continue
+        canonical[name] = name
+    return series.map(canonical)
 
-if not df.empty:
-    # Normalize city names
-    df["City Name"] = (
-        df["City Name"]
+def clean_numeric(series):
+    return (
+        series.astype(str)
+        .str.extract(r"(\d+(?:\.\d+)?)")[0]
+        .astype(float)
+    )
+
+def load_and_clean_csv(file_path):
+    try:
+        df_temp = pd.read_csv(file_path)
+    except Exception:
+        return pd.DataFrame()
+    
+    if df_temp.empty or "City Name" not in df_temp.columns:
+        return pd.DataFrame()
+    
+    df_temp["City Name"] = (
+        df_temp["City Name"]
         .astype(str)
         .str.strip()
         .str.lower()
@@ -108,34 +124,31 @@ if not df.empty:
         .str.replace(r"\s+", " ", regex=True)
         .str.title()
     )
-
-    def unify_city_names(series, threshold=90):
-        unique_names = list(series.unique())
-        canonical = {}
-        for name in unique_names:
-            if canonical:
-                result = process.extractOne(name, canonical.keys(), score_cutoff=threshold)
-                if result:
-                    canonical[name] = result[0]
-                    continue
-            canonical[name] = name
-        return series.map(canonical)
-
-    df["City Name"] = unify_city_names(df["City Name"])
-
-    # Clean numeric columns
-    def clean_numeric(series):
-        return (
-            series.astype(str)
-            .str.extract(r"(\d+(?:\.\d+)?)")[0]
-            .astype(float)
-        )
-
+    df_temp["City Name"] = unify_city_names(df_temp["City Name"])
+    
     for col in ["No. of Deaths - Total", "Total No. of Live Births"]:
-        df[col] = clean_numeric(df[col])
+        if col in df_temp.columns:
+            df_temp[col] = clean_numeric(df_temp[col])
+    
+    return df_temp
 
 # -----------------------------------------------------------
-# ADMIN TAB FOR CSV UPLOAD
+# Load Default CSV + Uploaded CSVs
+# -----------------------------------------------------------
+df = load_and_clean_csv(DEFAULT_CSV_PATH)
+
+uploaded_files = os.listdir(UPLOAD_FOLDER)
+for file_name in uploaded_files:
+    uploaded_path = os.path.join(UPLOAD_FOLDER, file_name)
+    df_uploaded = load_and_clean_csv(uploaded_path)
+    if not df_uploaded.empty:
+        df = pd.concat([df, df_uploaded], ignore_index=True)
+
+if df.empty:
+    st.warning("Default CSV not found. Please upload a CSV in the Admin tab.")
+
+# -----------------------------------------------------------
+# Admin Tab
 # -----------------------------------------------------------
 admin_password = "admin123"
 tab1, tab2 = st.tabs(["Dashboard", "Admin"])
@@ -154,7 +167,6 @@ with tab2:
                 f.write(uploaded_file.getbuffer())
             st.success(f"File saved to {save_path}")
 
-        # List uploaded files
         st.markdown("### Uploaded Files")
         uploaded_files = os.listdir(UPLOAD_FOLDER)
         if uploaded_files:
@@ -163,33 +175,6 @@ with tab2:
                 for file_name in files_to_delete:
                     os.remove(os.path.join(UPLOAD_FOLDER, file_name))
                 st.success("Selected files deleted.")
-
-            files_to_load = st.multiselect("Select files to merge with dashboard data", uploaded_files)
-            if st.button("Merge Selected Files"):
-                for file_name in files_to_load:
-                    try:
-                        new_df = pd.read_csv(os.path.join(UPLOAD_FOLDER, file_name))
-                        if not new_df.empty and "City Name" in new_df.columns:
-                            # Normalize city names
-                            new_df["City Name"] = (
-                                new_df["City Name"]
-                                .astype(str)
-                                .str.strip()
-                                .str.lower()
-                                .str.replace(r"[-_]", " ", regex=True)
-                                .str.replace(r"\s+", " ", regex=True)
-                                .str.title()
-                            )
-                            new_df["City Name"] = unify_city_names(new_df["City Name"])
-                            for col in ["No. of Deaths - Total", "Total No. of Live Births"]:
-                                if col in new_df.columns:
-                                    new_df[col] = clean_numeric(new_df[col])
-                            df = pd.concat([df, new_df], ignore_index=True)
-                            st.success(f"{file_name} merged successfully! Data now has {len(df)} rows.")
-                        else:
-                            st.warning(f"{file_name} is empty or missing 'City Name' column.")
-                    except Exception as e:
-                        st.error(f"Error processing {file_name}: {e}")
         else:
             st.info("No uploaded files yet.")
 
@@ -197,7 +182,7 @@ with tab2:
         st.error("❌ Incorrect password")
 
 # -----------------------------------------------------------
-# DASHBOARD
+# Dashboard Tab
 # -----------------------------------------------------------
 with tab1:
     if df.empty:
@@ -224,7 +209,7 @@ with tab1:
         # Dashboard Layout
         col_left, col_right = st.columns([1.2, 1.8])
 
-        # LEFT COLUMN - DATA + STATS
+        # LEFT COLUMN
         with col_left:
             with st.container():
                 st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
@@ -265,16 +250,16 @@ with tab1:
                     else:
                         # Filter business-relevant insights
                         def filter_business_insights(items):
-                            filtered = []
+                            filtered_items = []
                             for it in items:
                                 text = it.get("text", "").lower() if "text" in it else ""
                                 action = it.get("action", "").lower() if "action" in it else ""
-                                if any(keyword in text for keyword in ["missing", "nan", "null", "data validation", "incomplete"]):
+                                if any(k in text for k in ["missing", "nan", "null", "data validation", "incomplete"]):
                                     continue
-                                if any(keyword in action for keyword in ["missing", "nan", "null", "data validation", "incomplete"]):
+                                if any(k in action for k in ["missing", "nan", "null", "data validation", "incomplete"]):
                                     continue
-                                filtered.append(it)
-                            return filtered
+                                filtered_items.append(it)
+                            return filtered_items
 
                         key_interpretations = filter_business_insights(j.get("interpretations", []))
                         recommendations = filter_business_insights(j.get("recommendations", []))
