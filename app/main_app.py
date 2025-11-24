@@ -8,6 +8,15 @@ from thefuzz import process
 import base64
 
 # -----------------------------------------------------------
+# BASE DIR / RELATIVE PATHS
+# -----------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TIRANGA_PATH = os.path.join(BASE_DIR, "tiranga.jpeg")
+DEFAULT_CSV_PATH = os.path.join(BASE_DIR, "data", "cleaned_mortality_final.csv")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "data", "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# -----------------------------------------------------------
 # PAGE CONFIG
 # -----------------------------------------------------------
 st.set_page_config(
@@ -18,7 +27,7 @@ st.set_page_config(
 # -----------------------------------------------------------
 # Load background image
 # -----------------------------------------------------------
-with open(r"C:\Users\Khushi Agarwal\Desktop\GovAI\app\tiranga.jpeg", "rb") as f:
+with open(TIRANGA_PATH, "rb") as f:
     data = f.read()
     b64_data = base64.b64encode(data).decode()
 
@@ -79,7 +88,7 @@ st.markdown("<p class='sub-title'>AI-powered analytics for city mortality and he
 # -----------------------------------------------------------
 # Load & Clean Original Data
 # -----------------------------------------------------------
-df = pd.read_csv("data/cleaned_mortality_final.csv")
+df = pd.read_csv(DEFAULT_CSV_PATH)
 
 # Normalize city names
 df["City Name"] = (
@@ -95,7 +104,6 @@ df["City Name"] = (
 def unify_city_names(series, threshold=90):
     unique_names = list(series.unique())
     canonical = {}
-
     for name in unique_names:
         if canonical:
             result = process.extractOne(name, canonical.keys(), score_cutoff=threshold)
@@ -103,7 +111,6 @@ def unify_city_names(series, threshold=90):
                 canonical[name] = result[0]
                 continue
         canonical[name] = name
-
     return series.map(canonical)
 
 df["City Name"] = unify_city_names(df["City Name"])
@@ -123,9 +130,6 @@ for col in ["No. of Deaths - Total", "Total No. of Live Births"]:
 # ADMIN TAB FOR CSV UPLOAD
 # -----------------------------------------------------------
 admin_password = "admin123"
-UPLOAD_FOLDER = "data/uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 tab1, tab2 = st.tabs(["Dashboard", "Admin"])
 
 with tab2:
