@@ -1,98 +1,113 @@
+# File: GovAI/app/main_app.py
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import base64
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 from thefuzz import process
 from app.gemini_helpers import make_prompt_from_df, call_gemini_for_analysis
 
 # ---------------------------
-# Page Setup & Styling
+# Paths & Constants
+# ---------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))         # GovAI/app
+ROOT_DIR = os.path.dirname(BASE_DIR)                         # GovAI
+DEFAULT_CSV_PATH = os.path.join(ROOT_DIR, "data", "cleaned_mortality_final.csv")
+TIRANGA_PATH = os.path.join(BASE_DIR, "tiranga.jpeg")
+ADMIN_PASSWORD = "admin123"
+
+# ---------------------------
+# Page config & styling (flat UI)
 # ---------------------------
 st.set_page_config(page_title="GovAI", layout="wide")
 
-st.markdown("""
+# Load tiranga image as base64 (if present)
+tiranga_b64 = None
+if os.path.exists(TIRANGA_PATH):
+    with open(TIRANGA_PATH, "rb") as f:
+        tiranga_b64 = base64.b64encode(f.read()).decode()
+
+# Minimal CSS: title with background image; remove card boxes
+st.markdown(
+    f"""
     <style>
-    .stApp { background-color: #f7fafc; }
-    .main-title {
+    .stApp {{ background-color: #ffffff; }}
+    .govai-title {{
         text-align: center;
-        font-size: 2.2rem;
-        color: #1E3A8A;
-        font-weight: 700;
-        margin-bottom: 5px;
-    }
-    .sub-title {
+        font-size: 2.4rem;
+        color: #ffffff;
+        font-weight: 800;
+        margin: 0 0 8px 0;
+        padding: 48px 12px;
+        border-radius: 12px;
+        background-color: #1E3A8A;
+        {"background-image: url('data:image/png;base64," + tiranga_b64 + "'); background-size: cover; background-position: center;" if tiranga_b64 else ""}
+    }}
+    .govai-subtitle {{
         text-align: center;
-        color: #2563EB;
+        color: #1E293B;
         font-size: 1rem;
-        margin-bottom: 30px;
-    }
-    .dashboard-box {
-        background-color: white;
-        padding: 20px;
-        border-radius: 15px;
-        box-shadow: 0px 2px 6px rgba(0,0,0,0.1);
-        margin-bottom: 25px;
-    }
-    .section-header {
-        color: #2563EB;
-        font-size: 1.3rem;
-        margin-bottom: 10px;
-    }
+        margin-bottom: 20px;
+    }}
+    /* remove Streamlit default card look for main containers */
+    .streamlit-expanderHeader {{}}
+    .block-container {{ padding: 24px 36px; }}
+    .section-header {{
+        color: #0f172a;
+        font-weight: 700;
+        margin: 8px 0 6px 0;
+        font-size: 1.05rem;
+    }}
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
+
+# Header area (title + subtitle)
+st.markdown(f"<div class='govai-title'>GovAI Dashboard</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='govai-subtitle'>AI-powered analytics for city mortality and health trends</div>", unsafe_allow_html=True)
 
 # ---------------------------
-# Title
+# Session-state-backed DataFrame (persist while session runs)
 # ---------------------------
-st.markdown("<h1 class='main-title'>GovAI Dashboard</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sub-title'>AI-powered analytics for city mortality and health trends</p>", unsafe_allow_html=True)
+if "df" not in st.session_state:
+    # Load default CSV from sibling data/ folder
+    if not os.path.exists(DEFAULT_CSV_PATH):
+        st.error(f"❌ Default dataset not found at: {DEFAULT_CSV_PATH}")
+        st.stop()
+    try:
+        st.session_state.df = pd.read_csv(DEFAULT_CSV_PATH)
+    except Exception as e:
+        st.error(f"❌ Failed to read default CSV: {e}")
+        st.stop()
+
+# convenience reference
+df = st.session_state.df
 
 # ---------------------------
-# SAFE DEFAULT DATA LOADING
+# Cleaning helpers
 # ---------------------------
-DEFAULT_DATA_PATH = "data/cleaned_mortality_final.csv"
-
-if not os.path.exists(DEFAULT_DATA_PATH):
-    st.error(f"❌ Default dataset not found at: {DEFAULT_DATA_PATH}")
-    st.stop()
-
-# load default dataset
-try:
-    df = pd.read_csv(DEFAULT_DATA_PATH)
-except Exception as e:
-    st.error(f"❌ Error reading default dataset: {e}")
-    st.stop()
-
-# ---------------------------
-# Cleaning Helpers
-# ---------------------------
-def unify_city_names(series, threshold=90):
+def unify_city_names(series: pd.Series, threshold: int = 90) -> pd.Series:
+    """Map variant city names to canonical using fuzzy matching across observed names."""
     unique_names = list(series.dropna().unique())
     canonical = {}
-
     for name in unique_names:
         best_match = None
         if canonical:
             result = process.extractOne(name, canonical.keys(), score_cutoff=threshold)
-            if result is not None:
+            if result:
                 best_match = result[0]
         canonical[name] = best_match if best_match else name
-
     return series.map(canonical)
 
-def clean_numeric(series):
-    # extract first numeric group (integer/float), convert to float, keep NaN if missing
-    return (
-        series.astype(str)
-        .str.extract(r"(\d+(?:\.\d+)?)")[0]
-        .astype(float)
-    )
+def clean_numeric(series: pd.Series) -> pd.Series:
+    """Extract first numeric group and convert to float (keeps NaN if no match)."""
+    return series.astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
 
-# ---------------------------
-# DEFAULT DATA CLEANING (idempotent)
-# ---------------------------
+# Ensure idempotent cleaning for base df
 if "City Name" in df.columns:
     df["City Name"] = (
         df["City Name"].astype(str)
@@ -108,75 +123,60 @@ for col in ["No. of Deaths - Total", "Total No. of Live Births"]:
     if col in df.columns:
         df[col] = clean_numeric(df[col])
 
-# ---------------------------
-# Tabs: Dashboard + Admin
-# ---------------------------
-tab_dashboard, tab_admin = st.tabs(["📊 Dashboard", "🔐 Admin"])
+# Save cleaned df back to session state
+st.session_state.df = df
 
 # ---------------------------
-# DASHBOARD TAB
+# Tabs: Dashboard & Admin
+# ---------------------------
+tab_dashboard, tab_admin = st.tabs(["Dashboard", "Admin"])
+
+# ---------------------------
+# DASHBOARD
 # ---------------------------
 with tab_dashboard:
-    st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
+    # Simple filter area (flat, no boxes)
     st.markdown("<div class='section-header'>🎯 Filters</div>", unsafe_allow_html=True)
 
-    # guard: required columns
+    # Validate required columns exist
     if "City Name" not in df.columns or "Year" not in df.columns:
-        st.error("Dataset missing required columns: 'City Name' and/or 'Year'.")
-    else:
-        cities = sorted(df["City Name"].dropna().unique())
-        years = sorted(df["Year"].dropna().unique())
+        st.error("Dataset missing required columns: 'City Name' and/or 'Year'. Upload a dataset that contains these columns.")
+        st.stop()
 
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            sel_cities = st.multiselect("🏙️ Select Cities", cities, default=cities[:5])
-        with col2:
-            sel_years = st.multiselect("📅 Select Years", years, default=years[-3:])
+    cities = sorted(df["City Name"].dropna().unique())
+    years = sorted(df["Year"].dropna().unique())
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        sel_cities = st.multiselect("🏙️ Select Cities", cities, default=cities[:5])
+    with col2:
+        sel_years = st.multiselect("📅 Select Years", years, default=years[-3:])
 
-    # filtered view (if filters exist)
-    if "City Name" in df.columns and "Year" in df.columns:
-        if not sel_cities:
-            sel_cities = cities[:5]  # fallback if user cleared selection
-        if not sel_years:
-            sel_years = years[-3:]
+    if not sel_cities:
+        sel_cities = cities[:5]
+    if not sel_years:
+        sel_years = years[-3:]
 
-        filtered = df[df["City Name"].isin(sel_cities) & df["Year"].isin(sel_years)]
-    else:
-        filtered = df.copy()
+    filtered = st.session_state.df[st.session_state.df["City Name"].isin(sel_cities) & st.session_state.df["Year"].isin(sel_years)]
 
-    # layout columns
+    # Layout: left table / stats, right AI panel
     col_left, col_right = st.columns([1.2, 1.8])
 
-    # LEFT COLUMN - Data + Stats
+    # LEFT: data preview + metrics (flat)
     with col_left:
-        st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
         st.markdown("<div class='section-header'>📊 Filtered Data Preview</div>", unsafe_allow_html=True)
         st.dataframe(filtered.head(20), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
         st.markdown("<div class='section-header'>📈 Summary Statistics</div>", unsafe_allow_html=True)
+        total_deaths = int(filtered["No. of Deaths - Total"].sum(skipna=True) or 0) if "No. of Deaths - Total" in filtered.columns else 0
+        avg_births = int(filtered["Total No. of Live Births"].mean(skipna=True) or 0) if "Total No. of Live Births" in filtered.columns else 0
+        m1, m2 = st.columns(2)
+        m1.metric("🕊️ Total Deaths", f"{total_deaths:,}")
+        m2.metric("👶 Avg. Births", f"{avg_births:,}")
 
-        total_deaths = 0
-        avg_births = 0
-        if "No. of Deaths - Total" in filtered.columns:
-            total_deaths = int(filtered["No. of Deaths - Total"].sum(skipna=True) or 0)
-        if "Total No. of Live Births" in filtered.columns:
-            avg_births = int(filtered["Total No. of Live Births"].mean(skipna=True) or 0)
-
-        c1, c2 = st.columns(2)
-        c1.metric("🕊️ Total Deaths", f"{total_deaths:,}")
-        c2.metric("👶 Avg. Births", f"{avg_births:,}")
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # RIGHT COLUMN - Gemini Analysis
+    # RIGHT: Gemini AI analysis
     with col_right:
-        st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
         st.markdown("<div class='section-header'>🧠 Gemini AI Analysis</div>", unsafe_allow_html=True)
-
         if st.button("🚀 Generate AI Insights"):
             with st.spinner("Generating insights..."):
                 try:
@@ -184,25 +184,29 @@ with tab_dashboard:
                     prompt = make_prompt_from_df(sample_df)
                     parsed_json, raw_text = call_gemini_for_analysis(prompt)
                 except Exception as e:
-                    st.error(f"Error while calling Gemini API: {e}")
+                    st.error(f"Error while calling Gemini: {e}")
                     parsed_json, raw_text = None, None
 
             if not parsed_json:
-                st.warning("⚠️ No valid response received or parsing failed.")
+                st.warning("⚠️ No valid JSON response from Gemini or parsing failed.")
                 if raw_text:
                     st.text_area("Raw AI output (truncated)", raw_text[:4000], height=200)
             else:
                 st.markdown("#### 📘 AI Summary")
-                st.write(parsed_json.get("summary", "No summary available."))
+                st.write(parsed_json.get("summary", "No summary."))
 
                 st.markdown("#### 🔍 Key Interpretations")
                 for it in parsed_json.get("interpretations", []):
-                    text = it.get("text") if isinstance(it, dict) else str(it)
+                    if isinstance(it, dict):
+                        text = it.get("text", "")
+                    else:
+                        text = str(it)
                     st.markdown(f"- {text}")
 
                 st.markdown("#### ⚠️ Top Risks")
-                if isinstance(parsed_json.get("top_risks"), list) and parsed_json["top_risks"]:
-                    st.dataframe(pd.DataFrame(parsed_json["top_risks"]), use_container_width=True)
+                top_risks = parsed_json.get("top_risks", [])
+                if isinstance(top_risks, list) and top_risks:
+                    st.dataframe(pd.DataFrame(top_risks), use_container_width=True)
                 else:
                     st.write("No major risks identified.")
 
@@ -215,31 +219,24 @@ with tab_dashboard:
                         rationale = rec.get("rationale", "")
                         st.markdown(f"- **{action}** (Dept: {dept}, Urgency: {urgency}) — {rationale}")
                     else:
-                        st.markdown(f"- {str(rec)}")
-
-        st.markdown("</div>", unsafe_allow_html=True)
+                        st.markdown(f"- {rec}")
 
 # ---------------------------
-# ADMIN TAB
+# ADMIN
 # ---------------------------
 with tab_admin:
-    st.markdown("<div class='dashboard-box'>", unsafe_allow_html=True)
-    st.markdown("### 🔐 Admin Panel — Upload Additional CSVs", unsafe_allow_html=True)
-
-    ADMIN_PASSWORD = "admin123"
-    password = st.text_input("Enter Admin Password", type="password")
-
-    if password == ADMIN_PASSWORD:
+    st.markdown("<div class='section-header'>🔐 Admin — Upload Additional CSVs</div>", unsafe_allow_html=True)
+    pwd = st.text_input("Enter Admin Password", type="password")
+    if pwd == ADMIN_PASSWORD:
         st.success("✅ Access granted")
-
-        uploaded_files = st.file_uploader("Upload CSV files to merge (optional)", accept_multiple_files=True, type=["csv"])
+        uploaded_files = st.file_uploader("Upload CSV files to merge with default dataset", accept_multiple_files=True, type=["csv"])
         if uploaded_files:
-            merge_count = 0
-            for file in uploaded_files:
+            merged = 0
+            for upload in uploaded_files:
                 try:
-                    new_df = pd.read_csv(file)
+                    new_df = pd.read_csv(upload)
 
-                    # normalize city names if present
+                    # Normalize if City Name present
                     if "City Name" in new_df.columns:
                         new_df["City Name"] = (
                             new_df["City Name"].astype(str)
@@ -255,19 +252,16 @@ with tab_admin:
                         if col in new_df.columns:
                             new_df[col] = clean_numeric(new_df[col])
 
-                    # merge into the main dataframe
-                    df = pd.concat([df, new_df], ignore_index=True)
-                    merge_count += 1
-                    st.success(f"Merged: {file.name} (rows: {len(new_df)})")
+                    # Append to session DataFrame
+                    st.session_state.df = pd.concat([st.session_state.df, new_df], ignore_index=True)
+                    merged += 1
+                    st.success(f"Merged: {upload.name} (rows: {len(new_df)})")
                 except Exception as e:
-                    st.error(f"Failed to process {file.name}: {e}")
+                    st.error(f"Failed to merge {upload.name}: {e}")
 
-            if merge_count:
-                st.info(f"✅ {merge_count} file(s) merged. Dashboard will use merged data now.")
+            if merged:
+                st.info(f"✅ {merged} file(s) merged. Use the Dashboard tab to view merged data.")
         else:
             st.info("No files uploaded. Upload CSVs to merge them with the default dataset.")
-
-    elif password:
+    elif pwd:
         st.error("❌ Incorrect password")
-
-    st.markdown("</div>", unsafe_allow_html=True)

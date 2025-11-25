@@ -1,17 +1,16 @@
+# File: GovAI/app/gemini_helpers.py
 import os
 import json
 from datetime import datetime
 import pandas as pd
 import google.generativeai as genai
 
-# Configure Gemini API (expect GEMINI_API_KEY in env or leave unset for local dev)
+# Configure Gemini (no error if env var missing; code will handle it)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def df_top_stats(df: pd.DataFrame, max_cities: int = 6):
-    """Lightweight numeric stats for a DataFrame."""
     numeric_cols = df.select_dtypes(include="number")
     stats = numeric_cols.describe().to_dict()
     sample = df.nlargest(max_cities, "No. of Deaths - Total", keep="first") if "No. of Deaths - Total" in df.columns else df.head(max_cities)
@@ -19,7 +18,6 @@ def df_top_stats(df: pd.DataFrame, max_cities: int = 6):
 
 
 def make_prompt_from_df(df: pd.DataFrame, context_instructions: str = None, max_rows: int = 150) -> str:
-    """Create a compact prompt (CSV + aggregated stats) for Gemini."""
     df = df.copy()
     keep = [
         "City Name", "Year",
@@ -42,7 +40,6 @@ def make_prompt_from_df(df: pd.DataFrame, context_instructions: str = None, max_
 
     stats, _ = df_top_stats(df)
     stats_json = json.dumps(stats, default=str)
-
     data_blob = df.round(2).to_csv(index=False)
 
     instructions = context_instructions or (
@@ -64,7 +61,6 @@ def make_prompt_from_df(df: pd.DataFrame, context_instructions: str = None, max_
 
 
 def _parse_gemini_output(text: str):
-    """Attempt robust JSON parsing; fallback to a structured summary object."""
     if not text:
         return {
             "summary": "",
@@ -76,13 +72,13 @@ def _parse_gemini_output(text: str):
             "raw_text": ""
         }
 
-    # First try direct parse
+    # try direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try to find the first {...} block
+    # try to extract JSON substring
     start = text.find("{")
     end = text.rfind("}") + 1
     if start != -1 and end != -1 and end > start:
@@ -92,7 +88,7 @@ def _parse_gemini_output(text: str):
         except Exception:
             pass
 
-    # fallback: build a best-effort structure
+    # fallback structure
     shortened = text[:400]
     lines = [l.strip("- ").strip() for l in text.splitlines() if l.strip()]
     interpretations = [{"text": l} for l in lines[:5] if len(l) > 20]
@@ -110,20 +106,17 @@ def _parse_gemini_output(text: str):
 
 def call_gemini_for_analysis(prompt: str, model_name: str = MODEL, temperature: float = 0.3):
     """
-    Call Gemini (non-streaming) and attempt to return parsed JSON + raw text.
-    Returns: (parsed_dict_or_none, raw_text_or_none)
+    Non-streaming call to Gemini. Returns (parsed_dict_or_fallback, raw_text).
+    If GEMINI_API_KEY is not set or call fails, returns a structured error fallback.
     """
     try:
         model_handle = genai.GenerativeModel(model_name)
-        # Newer SDKs expose generate_content; older ones might use generate_text
         if hasattr(model_handle, "generate_content"):
             resp = model_handle.generate_content(prompt, generation_config={"temperature": temperature})
         else:
             resp = model_handle.generate_text(prompt)
-
         raw_text = getattr(resp, "text", str(resp) or "")
     except Exception as e:
-        # Return a structured error summary so UI can present something useful
         raw_text = f"Error calling Gemini API: {e}"
         parsed = {
             "summary": raw_text,
@@ -136,6 +129,5 @@ def call_gemini_for_analysis(prompt: str, model_name: str = MODEL, temperature: 
         }
         return parsed, raw_text
 
-    # parse
     parsed = _parse_gemini_output(raw_text)
     return parsed, raw_text
