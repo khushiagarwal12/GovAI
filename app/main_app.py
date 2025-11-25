@@ -1,97 +1,112 @@
 # File: GovAI/app/main_app.py
 import sys
 import os
+from pathlib import Path
+import base64
+
+# ensure app package can import sibling modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import base64
-from pathlib import Path
 import streamlit as st
 import pandas as pd
 from thefuzz import process
 from app.gemini_helpers import make_prompt_from_df, call_gemini_for_analysis
 
 # ---------------------------
-# Paths & Constants
+# Paths & constants
 # ---------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))         # GovAI/app
-ROOT_DIR = os.path.dirname(BASE_DIR)                         # GovAI
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))     # GovAI/app
+ROOT_DIR = os.path.dirname(BASE_DIR)                     # GovAI
 DEFAULT_CSV_PATH = os.path.join(ROOT_DIR, "data", "cleaned_mortality_final.csv")
 TIRANGA_PATH = os.path.join(BASE_DIR, "tiranga.jpeg")
 ADMIN_PASSWORD = "admin123"
 
 # ---------------------------
-# Page config & styling (flat UI)
+# Page config & minimal styling (flat UI + faded tiranga watermark)
 # ---------------------------
 st.set_page_config(page_title="GovAI", layout="wide")
 
-# Load tiranga image as base64 (if present)
+# load tiranga as base64 (if exists)
 tiranga_b64 = None
 if os.path.exists(TIRANGA_PATH):
     with open(TIRANGA_PATH, "rb") as f:
         tiranga_b64 = base64.b64encode(f.read()).decode()
 
-# Minimal CSS: title with background image; remove card boxes
+# minimal CSS: title with faded watermark; black title text; thin separators for sections
 st.markdown(
     f"""
     <style>
-    .stApp {{ background-color: #ffffff; }}
+    .stApp {{ background-color: #ffffff; color: #0f172a; }}
+    .govai-title-wrapper {{
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin: 12px 0 6px 0;
+        padding: 28px 14px;
+        border-radius: 8px;
+        {"background-image: linear-gradient(rgba(255,255,255,0.15), rgba(255,255,255,0.85)), url('data:image/png;base64," + tiranga_b64 + "');" if tiranga_b64 else "background-color: #ffffff;"}
+        background-size: cover;
+        background-position: center;
+    }}
     .govai-title {{
-        text-align: center;
         font-size: 2.4rem;
-        color: #ffffff;
+        color: #000000;     /* BLACK title text */
         font-weight: 800;
-        margin: 0 0 8px 0;
-        padding: 48px 12px;
-        border-radius: 12px;
-        background-color: #1E3A8A;
-        {"background-image: url('data:image/png;base64," + tiranga_b64 + "'); background-size: cover; background-position: center;" if tiranga_b64 else ""}
+        margin: 0;
+        padding: 0 6px;
     }}
     .govai-subtitle {{
         text-align: center;
-        color: #1E293B;
-        font-size: 1rem;
-        margin-bottom: 20px;
-    }}
-    /* remove Streamlit default card look for main containers */
-    .streamlit-expanderHeader {{}}
-    .block-container {{ padding: 24px 36px; }}
-    .section-header {{
         color: #0f172a;
+        font-size: 1rem;
+        margin-bottom: 18px;
+    }}
+
+    /* Thin black divider underneath section headers (Option C) */
+    .section-header {{
         font-weight: 700;
-        margin: 8px 0 6px 0;
+        color: #0f172a;
+        margin: 8px 0 4px 0;
         font-size: 1.05rem;
     }}
+    .section-divider {{
+        border: none;
+        border-top: 1px solid #000000;
+        margin: 4px 0 14px 0;
+        width: 100%;
+    }}
+
+    /* remove default card shadows and heavy padding where possible */
+    .block-container {{ padding: 18px 36px; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # Header area (title + subtitle)
-st.markdown(f"<div class='govai-title'>GovAI Dashboard</div>", unsafe_allow_html=True)
-st.markdown(f"<div class='govai-subtitle'>AI-powered analytics for city mortality and health trends</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='govai-title-wrapper'><h1 class='govai-title'>GovAI Dashboard</h1></div>", unsafe_allow_html=True)
+st.markdown("<div class='govai-subtitle'>AI-powered analytics for city mortality and health trends</div>", unsafe_allow_html=True)
 
 # ---------------------------
-# Session-state-backed DataFrame (persist while session runs)
+# Load default dataset into session_state (so uploads/merges persist)
 # ---------------------------
 if "df" not in st.session_state:
-    # Load default CSV from sibling data/ folder
     if not os.path.exists(DEFAULT_CSV_PATH):
         st.error(f"❌ Default dataset not found at: {DEFAULT_CSV_PATH}")
         st.stop()
     try:
         st.session_state.df = pd.read_csv(DEFAULT_CSV_PATH)
     except Exception as e:
-        st.error(f"❌ Failed to read default CSV: {e}")
+        st.error(f"❌ Error reading default dataset: {e}")
         st.stop()
 
-# convenience reference
+# convenience alias
 df = st.session_state.df
 
 # ---------------------------
 # Cleaning helpers
 # ---------------------------
 def unify_city_names(series: pd.Series, threshold: int = 90) -> pd.Series:
-    """Map variant city names to canonical using fuzzy matching across observed names."""
     unique_names = list(series.dropna().unique())
     canonical = {}
     for name in unique_names:
@@ -104,10 +119,10 @@ def unify_city_names(series: pd.Series, threshold: int = 90) -> pd.Series:
     return series.map(canonical)
 
 def clean_numeric(series: pd.Series) -> pd.Series:
-    """Extract first numeric group and convert to float (keeps NaN if no match)."""
+    # extract first numeric group and convert to float; keeps NaN if missing
     return series.astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
 
-# Ensure idempotent cleaning for base df
+# apply idempotent cleaning if required columns exist
 if "City Name" in df.columns:
     df["City Name"] = (
         df["City Name"].astype(str)
@@ -123,7 +138,7 @@ for col in ["No. of Deaths - Total", "Total No. of Live Births"]:
     if col in df.columns:
         df[col] = clean_numeric(df[col])
 
-# Save cleaned df back to session state
+# save cleaned df back to session
 st.session_state.df = df
 
 # ---------------------------
@@ -135,48 +150,57 @@ tab_dashboard, tab_admin = st.tabs(["Dashboard", "Admin"])
 # DASHBOARD
 # ---------------------------
 with tab_dashboard:
-    # Simple filter area (flat, no boxes)
+    # Filters section (flat header + thin line)
     st.markdown("<div class='section-header'>🎯 Filters</div>", unsafe_allow_html=True)
+    st.markdown("<hr class='section-divider'/>", unsafe_allow_html=True)
 
-    # Validate required columns exist
+    # validate essential columns
     if "City Name" not in df.columns or "Year" not in df.columns:
         st.error("Dataset missing required columns: 'City Name' and/or 'Year'. Upload a dataset that contains these columns.")
-        st.stop()
+    else:
+        cities = sorted(df["City Name"].dropna().unique())
+        years = sorted(df["Year"].dropna().unique())
 
-    cities = sorted(df["City Name"].dropna().unique())
-    years = sorted(df["Year"].dropna().unique())
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            sel_cities = st.multiselect("🏙️ Select Cities", cities, default=cities[:5])
+        with col2:
+            sel_years = st.multiselect("📅 Select Years", years, default=years[-3:])
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        sel_cities = st.multiselect("🏙️ Select Cities", cities, default=cities[:5])
-    with col2:
-        sel_years = st.multiselect("📅 Select Years", years, default=years[-3:])
+        if not sel_cities:
+            sel_cities = cities[:5]
+        if not sel_years:
+            sel_years = years[-3:]
 
-    if not sel_cities:
-        sel_cities = cities[:5]
-    if not sel_years:
-        sel_years = years[-3:]
+    # create filtered dataframe (safe fallback)
+    if "City Name" in df.columns and "Year" in df.columns:
+        filtered = st.session_state.df[st.session_state.df["City Name"].isin(sel_cities) & st.session_state.df["Year"].isin(sel_years)]
+    else:
+        filtered = st.session_state.df.copy()
 
-    filtered = st.session_state.df[st.session_state.df["City Name"].isin(sel_cities) & st.session_state.df["Year"].isin(sel_years)]
-
-    # Layout: left table / stats, right AI panel
+    # Data preview + stats / AI analysis layout
     col_left, col_right = st.columns([1.2, 1.8])
 
-    # LEFT: data preview + metrics (flat)
+    # LEFT: data preview and metrics
     with col_left:
         st.markdown("<div class='section-header'>📊 Filtered Data Preview</div>", unsafe_allow_html=True)
+        st.markdown("<hr class='section-divider'/>", unsafe_allow_html=True)
         st.dataframe(filtered.head(20), use_container_width=True)
 
         st.markdown("<div class='section-header'>📈 Summary Statistics</div>", unsafe_allow_html=True)
+        st.markdown("<hr class='section-divider'/>", unsafe_allow_html=True)
+
         total_deaths = int(filtered["No. of Deaths - Total"].sum(skipna=True) or 0) if "No. of Deaths - Total" in filtered.columns else 0
         avg_births = int(filtered["Total No. of Live Births"].mean(skipna=True) or 0) if "Total No. of Live Births" in filtered.columns else 0
         m1, m2 = st.columns(2)
         m1.metric("🕊️ Total Deaths", f"{total_deaths:,}")
         m2.metric("👶 Avg. Births", f"{avg_births:,}")
 
-    # RIGHT: Gemini AI analysis
+    # RIGHT: Gemini AI panel
     with col_right:
         st.markdown("<div class='section-header'>🧠 Gemini AI Analysis</div>", unsafe_allow_html=True)
+        st.markdown("<hr class='section-divider'/>", unsafe_allow_html=True)
+
         if st.button("🚀 Generate AI Insights"):
             with st.spinner("Generating insights..."):
                 try:
@@ -197,10 +221,7 @@ with tab_dashboard:
 
                 st.markdown("#### 🔍 Key Interpretations")
                 for it in parsed_json.get("interpretations", []):
-                    if isinstance(it, dict):
-                        text = it.get("text", "")
-                    else:
-                        text = str(it)
+                    text = it.get("text") if isinstance(it, dict) else str(it)
                     st.markdown(f"- {text}")
 
                 st.markdown("#### ⚠️ Top Risks")
@@ -226,6 +247,8 @@ with tab_dashboard:
 # ---------------------------
 with tab_admin:
     st.markdown("<div class='section-header'>🔐 Admin — Upload Additional CSVs</div>", unsafe_allow_html=True)
+    st.markdown("<hr class='section-divider'/>", unsafe_allow_html=True)
+
     pwd = st.text_input("Enter Admin Password", type="password")
     if pwd == ADMIN_PASSWORD:
         st.success("✅ Access granted")
@@ -236,7 +259,7 @@ with tab_admin:
                 try:
                     new_df = pd.read_csv(upload)
 
-                    # Normalize if City Name present
+                    # Normalize city names if present
                     if "City Name" in new_df.columns:
                         new_df["City Name"] = (
                             new_df["City Name"].astype(str)
@@ -252,7 +275,7 @@ with tab_admin:
                         if col in new_df.columns:
                             new_df[col] = clean_numeric(new_df[col])
 
-                    # Append to session DataFrame
+                    # append into session dataframe
                     st.session_state.df = pd.concat([st.session_state.df, new_df], ignore_index=True)
                     merged += 1
                     st.success(f"Merged: {upload.name} (rows: {len(new_df)})")

@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 import google.generativeai as genai
 
-# Configure Gemini (no error if env var missing; code will handle it)
+# Configure Gemini API (safe if env var missing; call will return a structured error)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
@@ -78,7 +78,7 @@ def _parse_gemini_output(text: str):
     except json.JSONDecodeError:
         pass
 
-    # try to extract JSON substring
+    # try to extract first JSON block
     start = text.find("{")
     end = text.rfind("}") + 1
     if start != -1 and end != -1 and end > start:
@@ -88,7 +88,7 @@ def _parse_gemini_output(text: str):
         except Exception:
             pass
 
-    # fallback structure
+    # fallback: short summary + best-effort interpretations
     shortened = text[:400]
     lines = [l.strip("- ").strip() for l in text.splitlines() if l.strip()]
     interpretations = [{"text": l} for l in lines[:5] if len(l) > 20]
